@@ -28,8 +28,8 @@ Signed and notarized builds need no Gatekeeper workaround.
 ### From source
 
 ```bash
-git clone https://github.com/dnconsulting/ngrok_monitor.git
-cd ngrok_monitor
+git clone https://github.com/dnc4104/ngrok_monitoring.git
+cd ngrok_monitoring
 ./build.sh
 open ~/Applications/NgrokMonitor.app
 ```

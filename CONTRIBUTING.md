@@ -12,8 +12,8 @@ Thanks for considering a contribution! This is a small macOS menu bar utility â€
 ## Building
 
 ```bash
-git clone https://github.com/dnconsulting/ngrok_monitor.git
-cd ngrok_monitor
+git clone https://github.com/dnc4104/ngrok_monitoring.git
+cd ngrok_monitoring
 swift build -c release        # produces .build/release/NgrokMonitor (binary only)
 ./build.sh                    # produces ~/Applications/NgrokMonitor.app (proper bundle)
 ```
