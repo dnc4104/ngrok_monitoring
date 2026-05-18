@@ -1,0 +1,38 @@
+name: Build
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  build:
+    name: Build (macOS)
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Show toolchain
+        run: |
+          sw_vers
+          swift --version
+
+      - name: swift build
+        run: swift build -c release
+
+      - name: Package .app
+        env:
+          # The shipped build.sh installs to ~/Applications; CI just needs
+          # to verify the bundle assembles end-to-end.
+          NGROK_MONITOR_APP_DIR: ${{ github.workspace }}/dist/NgrokMonitor.app
+        run: |
+          mkdir -p dist
+          NGROK_MONITOR_APP_DIR="$NGROK_MONITOR_APP_DIR" ./build.sh
+
+      - name: Upload .app artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: NgrokMonitor-unsigned-app
+          path: dist/NgrokMonitor.app
+          if-no-files-found: error

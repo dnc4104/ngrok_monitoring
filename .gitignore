@@ -1,0 +1,8 @@
+.build/
+.xcodeproj/
+.swiftpm/
+DerivedData/
+*.xctestplan
+.DS_Store
+dist/
+*.zip
