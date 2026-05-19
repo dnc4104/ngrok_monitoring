@@ -28,11 +28,13 @@ mkdir -p "$APP_DIR/Contents/Resources"
 
 cp "$BINARY" "$APP_DIR/Contents/MacOS/NgrokMonitor"
 
-# SwiftPM-generated resource bundle has to sit next to the executable so Bundle.module resolves.
-RESOURCE_BUNDLE=".build/release/NgrokMonitor_NgrokMonitor.bundle"
-if [ -d "$RESOURCE_BUNDLE" ]; then
-    cp -R "$RESOURCE_BUNDLE" "$APP_DIR/Contents/MacOS/"
-fi
+# Copy PNG resources directly into Contents/Resources/ (canonical macOS .app layout).
+# We deliberately do NOT embed SwiftPM's .build/release/NgrokMonitor_NgrokMonitor.bundle:
+# it's a flat directory with no Contents/Info.plist, so `codesign --deep` rejects it as
+# an unsuitable bundle. The loader code falls back through Bundle.main → Bundle.module
+# so both `./build.sh` and `swift run` workflows resolve resources correctly.
+cp Sources/NgrokMonitor/Resources/ngrok-black.png "$APP_DIR/Contents/Resources/"
+cp Sources/NgrokMonitor/Resources/ngrok-green.png "$APP_DIR/Contents/Resources/"
 
 cp Sources/NgrokMonitor/Resources/bundle.plist "$APP_DIR/Contents/Info.plist"
 
@@ -52,10 +54,17 @@ iconutil -c icns "$ICONSET" -o "$APP_DIR/Contents/Resources/AppIcon.icns"
 rm -rf "$ICONSET_PARENT"
 
 if [ -n "${CODESIGN_IDENTITY:-}" ]; then
+    # Strip macOS metadata that codesign rejects ("resource fork, Finder information,
+    # or similar detritus not allowed"). Sources include Finder tags on source files,
+    # quarantine xattrs from downloaded assets, and stray .DS_Store files.
+    find "$APP_DIR" -name '.DS_Store' -delete
+    xattr -cr "$APP_DIR"
+
     echo "🔏 Codesigning with: $CODESIGN_IDENTITY"
     codesign --deep --force --options runtime \
         --entitlements NgrokMonitor.entitlements \
         --sign "$CODESIGN_IDENTITY" \
+        --timestamp \
         "$APP_DIR"
     codesign -dv --verbose=2 "$APP_DIR" 2>&1 | head -10
 fi

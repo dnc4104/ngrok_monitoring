@@ -50,8 +50,12 @@ final class NgrokMonitor: NSObject, NSMenuDelegate {
     private static let greenIcon: NSImage? = loadIcon("ngrok-green")
 
     private static func loadIcon(_ name: String) -> NSImage? {
-        guard let url = Bundle.module.url(forResource: name, withExtension: "png"),
-              let img = NSImage(contentsOf: url) else {
+        // Look in Bundle.main first (canonical .app layout where build.sh drops PNGs
+        // into Contents/Resources/), then fall back to Bundle.module for `swift run`
+        // and other unbundled invocations.
+        let url = Bundle.main.url(forResource: name, withExtension: "png")
+            ?? Bundle.module.url(forResource: name, withExtension: "png")
+        guard let url, let img = NSImage(contentsOf: url) else {
             log.error("missing icon resource: \(name, privacy: .public).png")
             return nil
         }
