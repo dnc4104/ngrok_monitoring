@@ -86,6 +86,10 @@ final class NgrokMonitor: NSObject, NSMenuDelegate {
         buildMenu()
         refreshDynamicItems()
         statusItem.menu = menu
+        // Wire the inactivity/auto-stop callbacks at launch, not lazily from
+        // menuWillOpen. The hotkey can start ngrok without ever opening the menu,
+        // and without this the onInactivity callback stays nil → auto-stop dead.
+        setupTrafficMonitor()
         applyHotKey(KeyboardShortcut.load())
         DispatchQueue.global(qos: .utility).async { [weak self] in
             let version = NgrokProcessManager.shared.currentVersion()
@@ -227,12 +231,14 @@ final class NgrokMonitor: NSObject, NSMenuDelegate {
             DispatchQueue.main.async {
                 self.isStarting = false
                 if let error = error {
-                    self.showAlert(title: "Error", message: "Failed to start ngrok: \(error.localizedDescription)")
+                    self.showAlert(title: "Couldn’t start ngrok", message: error.localizedDescription)
+                    self.postNotification(title: "Ngrok Monitor", body: "Couldn’t start ngrok — check the dialog for details.")
                     self.updateStatusItemText()
                     self.refreshDynamicItems()
                     return
                 }
                 self.updateStatusItemText()
+                self.setupTrafficMonitor() // ensure auto-stop callbacks are wired (hotkey path may skip the menu)
                 self.trafficMonitor.startMonitoring()
                 self.fetchTunnels()
                 self.scheduleTunnelRefresh()
@@ -256,7 +262,14 @@ final class NgrokMonitor: NSObject, NSMenuDelegate {
     /// Toggle ngrok from the global hotkey: start if stopped, stop if running.
     @objc private func toggleNgrok() {
         guard !isStarting else { return } // already spinning up; ignore repeat presses
-        let isRunning = NgrokProcessManager.shared.running || !tunnelURLs.isEmpty
+        // The hotkey never opens the menu, so our in-memory state can be stale
+        // (menuWillOpen is what normally calls syncFromAPI). A live agent API on
+        // :4040 means ngrok is actually running — reconcile here so we stop it
+        // instead of firing a second `ngrok start` that ngrok rejects
+        // (ERR_NGROK_334 "endpoint already online") and that fails silently.
+        let isRunning = isLocalPortOpen(Constants.ngrokAgentPort)
+            || NgrokProcessManager.shared.running
+            || !tunnelURLs.isEmpty
         if isRunning {
             stopNgrok()
         } else {
@@ -794,9 +807,27 @@ final class NgrokMonitor: NSObject, NSMenuDelegate {
     // MARK: - Alerts
 
     private func showAlert(title: String, message: String) {
+        // Accessory (LSUIElement) apps aren't active, so a modal can open behind
+        // the foreground window. Activate first so the user actually sees it.
+        NSApp.activate(ignoringOtherApps: true)
         let alert = NSAlert()
         alert.messageText = title
         alert.informativeText = message
         alert.runModal()
+    }
+
+    /// Best-effort user notification (only when running as a real .app bundle).
+    /// Acts as a fallback in case a modal still doesn't surface.
+    private func postNotification(title: String, body: String) {
+        guard Bundle.main.bundleIdentifier != nil else { return }
+        UNUserNotificationCenter.current().requestAuthorization(options: [.alert, .sound]) { granted, _ in
+            guard granted else { return }
+            let content = UNMutableNotificationContent()
+            content.title = title
+            content.body = body
+            content.sound = .default
+            let request = UNNotificationRequest(identifier: "ngrok-start-failed", content: content, trigger: nil)
+            UNUserNotificationCenter.current().add(request)
+        }
     }
 }

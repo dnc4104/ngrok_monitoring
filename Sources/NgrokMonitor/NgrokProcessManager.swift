@@ -97,14 +97,28 @@ final class NgrokProcessManager {
     }
 
     func start(completion: @escaping (Error?) -> Void) {
+        // Deliver the outcome exactly once, on the main thread. Both the startup
+        // probe and the termination handler can race to report; whichever lands
+        // first wins and the other becomes a no-op. This guarantees the caller's
+        // "starting" UI state always resolves (no stuck blinking).
+        var didComplete = false
+        func finish(_ error: Error?) {
+            let deliver = {
+                guard !didComplete else { return }
+                didComplete = true
+                completion(error)
+            }
+            if Thread.isMainThread { deliver() } else { DispatchQueue.main.async(execute: deliver) }
+        }
+
         guard !isRunning else {
-            completion(nil)
+            finish(nil)
             return
         }
 
         guard let ngrokPath = resolveNgrokPath() else {
             let searched = Constants.ngrokSearchPaths.joined(separator: ", ")
-            completion(NSError(domain: "NgrokMonitor", code: 1, userInfo: [
+            finish(NSError(domain: "NgrokMonitor", code: 1, userInfo: [
                 NSLocalizedDescriptionKey: "ngrok executable not found. Looked in: \(searched). Install ngrok (brew install ngrok) or add it to one of those paths."
             ]))
             return
@@ -130,7 +144,21 @@ final class NgrokProcessManager {
             let tail = recentOutput
             outputLock.unlock()
             DispatchQueue.main.async {
-                self?.handleTermination(exitCode: proc.terminationStatus, output: tail)
+                guard let self = self else { return }
+                if !didComplete {
+                    // ngrok died inside the startup window (e.g. ERR_NGROK_334,
+                    // session limit, bad config). Report it through `completion`
+                    // so the caller shows one visible alert, and skip
+                    // handleTermination's separate dialog to avoid double alerts.
+                    self.isRunning = false
+                    self.process = nil
+                    self.fileHandle = nil
+                    finish(NSError(domain: "NgrokMonitor", code: Int(proc.terminationStatus), userInfo: [
+                        NSLocalizedDescriptionKey: "ngrok exited (code \(proc.terminationStatus)).\n\n\(tail.isEmpty ? "(no output)" : tail)"
+                    ]))
+                } else {
+                    self.handleTermination(exitCode: proc.terminationStatus, output: tail)
+                }
             }
         }
 
@@ -158,58 +186,94 @@ final class NgrokProcessManager {
                 }
             }
 
-            // Detect immediate failure (e.g., bad config).
-            DispatchQueue.global().asyncAfter(deadline: .now() + Constants.Timeout.earlyStartProbe) { [weak self, weak task] in
-                guard let task = task else { return }
+            // Confirm startup after a short probe. Capture `task` strongly so the
+            // probe always runs even if the process already died and self.process
+            // was cleared — otherwise the completion could leak and the caller's
+            // "starting" state would never resolve.
+            DispatchQueue.global().asyncAfter(deadline: .now() + Constants.Timeout.earlyStartProbe) {
                 if !task.isRunning && task.terminationStatus != 0 {
                     outputLock.lock()
                     let tail = recentOutput
                     outputLock.unlock()
-                    DispatchQueue.main.async {
-                        self?.isRunning = false
-                        completion(NSError(domain: "NgrokMonitor", code: Int(task.terminationStatus), userInfo: [
-                            NSLocalizedDescriptionKey: "ngrok exited (code \(task.terminationStatus)).\n\n\(tail.isEmpty ? "(no output)" : tail)"
-                        ]))
-                    }
-                    return
+                    finish(NSError(domain: "NgrokMonitor", code: Int(task.terminationStatus), userInfo: [
+                        NSLocalizedDescriptionKey: "ngrok exited (code \(task.terminationStatus)).\n\n\(tail.isEmpty ? "(no output)" : tail)"
+                    ]))
+                } else {
+                    finish(nil)
                 }
-                DispatchQueue.main.async { completion(nil) }
             }
         } catch {
-            completion(error)
+            self.isRunning = false
+            finish(error)
         }
     }
 
     func stop(completion: ((Error?) -> Void)? = nil) {
-        guard let proc = process, isRunning else {
+        if let proc = process, isRunning {
+            proc.terminate()
+
+            let semaphore = DispatchSemaphore(value: 0)
+            DispatchQueue.global().async {
+                proc.waitUntilExit()
+                semaphore.signal()
+            }
+            let timeout = semaphore.wait(timeout: .now() + Constants.Timeout.gracefulStop)
+
+            if timeout == .timedOut {
+                let killTask = Process()
+                killTask.launchPath = "/bin/kill"
+                killTask.arguments = ["-9", String(proc.processIdentifier)]
+                do {
+                    try killTask.run()
+                } catch {
+                    log.error("SIGKILL of ngrok pid \(proc.processIdentifier) failed: \(error.localizedDescription, privacy: .public)")
+                }
+            }
+
+            self.process = nil
+            self.fileHandle = nil
+            self.isRunning = false
             completion?(nil)
             return
         }
 
-        proc.terminate()
-
-        let semaphore = DispatchSemaphore(value: 0)
-        DispatchQueue.global().async {
-            proc.waitUntilExit()
-            semaphore.signal()
-        }
-        let timeout = semaphore.wait(timeout: .now() + Constants.Timeout.gracefulStop)
-
-        if timeout == .timedOut {
+        // We don't own a Process, but ngrok may still be alive from a previous
+        // app session (or started outside the app). If the agent port is up,
+        // terminate whatever holds it so the toggle does the obvious thing
+        // instead of silently no-opping.
+        if isLocalPortOpen(Constants.ngrokAgentPort), let pid = pidListeningOnAgentPort() {
             let killTask = Process()
             killTask.launchPath = "/bin/kill"
-            killTask.arguments = ["-9", String(proc.processIdentifier)]
+            killTask.arguments = ["-TERM", String(pid)]
             do {
                 try killTask.run()
+                killTask.waitUntilExit()
             } catch {
-                log.error("SIGKILL of ngrok pid \(proc.processIdentifier) failed: \(error.localizedDescription, privacy: .public)")
+                log.error("failed to terminate unowned ngrok pid \(pid): \(error.localizedDescription, privacy: .public)")
             }
         }
-
-        self.process = nil
-        self.fileHandle = nil
         self.isRunning = false
         completion?(nil)
+    }
+
+    /// PID of whatever process is listening on the ngrok agent port, or nil.
+    /// Used to reclaim an ngrok the app didn't spawn.
+    private func pidListeningOnAgentPort() -> Int32? {
+        let task = Process()
+        task.launchPath = "/usr/sbin/lsof"
+        task.arguments = ["-nP", "-iTCP:\(Constants.ngrokAgentPort)", "-sTCP:LISTEN", "-t"]
+        let pipe = Pipe()
+        task.standardOutput = pipe
+        task.standardError = Pipe()
+        do { try task.run() } catch {
+            log.error("lsof for ngrok agent port failed: \(error.localizedDescription, privacy: .public)")
+            return nil
+        }
+        task.waitUntilExit()
+        let data = pipe.fileHandleForReading.readDataToEndOfFile()
+        let out = String(data: data, encoding: .utf8) ?? ""
+        let firstLine = out.split(whereSeparator: { $0.isNewline }).first.map(String.init)
+        return firstLine.flatMap { Int32($0.trimmingCharacters(in: .whitespaces)) }
     }
 
     private func handleTermination(exitCode: Int32 = 0, output: String = "") {
@@ -219,6 +283,11 @@ final class NgrokProcessManager {
         self.fileHandle = nil
         self.onStateChange?(false)
         if wasRunning && exitCode != 0 {
+            // Repaint the menu-bar icon to "stopped" and bring the alert to the
+            // front — as an accessory (LSUIElement) app, a modal otherwise opens
+            // behind the foreground window and looks like nothing happened.
+            NgrokMonitor.shared.updateTunnelURLs([])
+            NSApp.activate(ignoringOtherApps: true)
             let alert = NSAlert()
             alert.messageText = "ngrok exited"
             alert.informativeText = "Exit code \(exitCode)\n\n\(output.isEmpty ? "(no output)" : output)"

@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.1.1] - 2026-06-01
+
+### Fixed
+- Global shortcut intermittently failing to start ngrok (icon blinked, then went
+  back to black with no tunnel). The hotkey now reconciles with the live agent
+  API before deciding start-vs-stop, so it never fires a second `ngrok start`
+  that ngrok rejects (ERR_NGROK_334 "endpoint already online"). Start failures
+  are now surfaced (the alert is brought to the front from the menu-bar app, plus
+  a notification fallback), and the "starting" state always resolves instead of
+  occasionally sticking.
+- Auto-stop after inactivity not firing when ngrok was started via the keyboard
+  shortcut. The inactivity callback was only wired when the menu was opened; it's
+  now wired at launch, so auto-stop works regardless of how ngrok was started.
+
 ## [1.1.0] - 2026-06-01
 
 ### Added
