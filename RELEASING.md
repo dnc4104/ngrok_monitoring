@@ -14,7 +14,7 @@ This document describes how to cut a signed, notarized release.
      ```bash
      xcrun notarytool store-credentials NGROK_MONITOR_NOTARY \
        --apple-id "you@example.com" \
-       --team-id "TEAMID" \
+       --team-id "MU8L28HQMA" \
        --password "xxxx-xxxx-xxxx-xxxx"
      ```
 
@@ -23,7 +23,7 @@ This document describes how to cut a signed, notarized release.
 Set the signing identity once per shell, then run the release script:
 
 ```bash
-export CODESIGN_IDENTITY="Developer ID Application: David Nguyen (TEAMID)"
+export CODESIGN_IDENTITY="Developer ID Application: HEADPOINT (MU8L28HQMA)"
 export NOTARY_PROFILE="NGROK_MONITOR_NOTARY"
 
 # 1. Bump version in Sources/NgrokMonitor/Resources/bundle.plist
