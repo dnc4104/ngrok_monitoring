@@ -8,6 +8,7 @@ A native macOS menu bar app for managing [ngrok](https://ngrok.com) tunnels with
 
 - **Menu bar presence** — lightweight icon, no Dock entry
 - **One-click start/stop** — runs `ngrok start --all`
+- **Global start/stop shortcut** — record your own hotkey in Preferences (⌘,)
 - **Live tunnel URLs** — click any URL to open it in your browser
 - **Recent traffic** — last few requests with method + path
 - **Auto-stop on inactivity** — configurable 1 / 5 / 10 / 30 minute timeout

@@ -31,6 +31,14 @@ final class NgrokMonitor: NSObject, NSMenuDelegate {
     private var trafficFetchInFlight: Bool = false
     private let maxTunnelSlots = 16
     private let maxTrafficSlots = 5
+    private var preferencesWindowController: PreferencesWindowController?
+    private var hotKeyItem: NSMenuItem?
+    /// True from the moment a start is requested until ngrok is confirmed up (or
+    /// failed). Drives the "starting…" feedback so a second hotkey press doesn't
+    /// read as a stop.
+    private var isStarting: Bool = false
+    private var blinkTimer: Timer?
+    private var blinkPhase: Bool = false
 
     private let timeoutOptions: [(String, TimeInterval)] = [
         ("1 minute", 60),
@@ -78,6 +86,7 @@ final class NgrokMonitor: NSObject, NSMenuDelegate {
         buildMenu()
         refreshDynamicItems()
         statusItem.menu = menu
+        applyHotKey(KeyboardShortcut.load())
         DispatchQueue.global(qos: .utility).async { [weak self] in
             let version = NgrokProcessManager.shared.currentVersion()
             DispatchQueue.main.async {
@@ -209,17 +218,25 @@ final class NgrokMonitor: NSObject, NSMenuDelegate {
     // MARK: - Actions
 
     @objc private func startNgrok() {
+        guard !isStarting else { return }
+        isStarting = true
+        updateStatusItemText()
+        refreshDynamicItems()
         NgrokProcessManager.shared.start { [weak self] error in
             guard let self = self else { return }
-            if let error = error {
-                self.showAlert(title: "Error", message: "Failed to start ngrok: \(error.localizedDescription)")
-                return
-            }
             DispatchQueue.main.async {
+                self.isStarting = false
+                if let error = error {
+                    self.showAlert(title: "Error", message: "Failed to start ngrok: \(error.localizedDescription)")
+                    self.updateStatusItemText()
+                    self.refreshDynamicItems()
+                    return
+                }
                 self.updateStatusItemText()
                 self.trafficMonitor.startMonitoring()
                 self.fetchTunnels()
                 self.scheduleTunnelRefresh()
+                self.refreshDynamicItems()
             }
         }
     }
@@ -234,6 +251,58 @@ final class NgrokMonitor: NSObject, NSMenuDelegate {
                 self.updateStatusItemText()
             }
         }
+    }
+
+    /// Toggle ngrok from the global hotkey: start if stopped, stop if running.
+    @objc private func toggleNgrok() {
+        guard !isStarting else { return } // already spinning up; ignore repeat presses
+        let isRunning = NgrokProcessManager.shared.running || !tunnelURLs.isEmpty
+        if isRunning {
+            stopNgrok()
+        } else {
+            startNgrok()
+        }
+    }
+
+    // MARK: - Global Hot Key
+
+    /// Register (or clear) the global start/stop hotkey and refresh its menu label.
+    private func applyHotKey(_ shortcut: KeyboardShortcut?) {
+        GlobalHotKeyManager.shared.apply(shortcut) { [weak self] in
+            self?.toggleNgrok()
+        }
+        refreshHotKeyItem(shortcut)
+    }
+
+    private func refreshHotKeyItem(_ shortcut: KeyboardShortcut?) {
+        guard let item = hotKeyItem else { return }
+        if let shortcut = shortcut, shortcut.hasRequiredModifier {
+            item.title = "Start/Stop Shortcut: \(shortcut.displayString)"
+        } else {
+            item.title = "Start/Stop Shortcut: none"
+        }
+        item.attributedTitle = NSAttributedString(
+            string: item.title,
+            attributes: [.foregroundColor: NSColor.systemGray]
+        )
+    }
+
+    @objc private func openPreferences() {
+        if preferencesWindowController == nil {
+            let controller = PreferencesWindowController(shortcut: KeyboardShortcut.load())
+            controller.onShortcutChange = { [weak self] shortcut in
+                if let shortcut = shortcut, shortcut.hasRequiredModifier {
+                    shortcut.save()
+                } else {
+                    KeyboardShortcut.clear()
+                }
+                self?.applyHotKey(shortcut)
+            }
+            preferencesWindowController = controller
+        }
+        NSApp.activate(ignoringOtherApps: true)
+        preferencesWindowController?.showWindow(nil)
+        preferencesWindowController?.window?.makeKeyAndOrderFront(nil)
     }
 
     @objc private func selectTimeout(_ sender: NSMenuItem) {
@@ -310,10 +379,43 @@ final class NgrokMonitor: NSObject, NSMenuDelegate {
             return
         }
         guard let button = statusItem.button else { return }
+        if isStarting {
+            button.title = ""
+            button.toolTip = "Starting ngrok…"
+            startBlinking()
+            return
+        }
+        stopBlinking()
         let isRunning = NgrokProcessManager.shared.running || !tunnelURLs.isEmpty
         button.title = ""
+        button.toolTip = nil
         button.image = makeNgrokIcon(running: isRunning)
         button.image?.accessibilityDescription = isRunning ? "Ngrok running" : "Ngrok stopped"
+    }
+
+    /// Blink the menu-bar icon green/black while ngrok is starting up.
+    private func startBlinking() {
+        guard blinkTimer == nil else { return }
+        blinkPhase = false
+        applyBlinkFrame()
+        let t = Timer(timeInterval: 0.5, repeats: true) { [weak self] _ in
+            guard let self = self else { return }
+            self.blinkPhase.toggle()
+            self.applyBlinkFrame()
+        }
+        RunLoop.main.add(t, forMode: .common)
+        blinkTimer = t
+    }
+
+    private func applyBlinkFrame() {
+        guard let button = statusItem.button else { return }
+        button.image = makeNgrokIcon(running: blinkPhase)
+        button.image?.accessibilityDescription = "Ngrok starting"
+    }
+
+    private func stopBlinking() {
+        blinkTimer?.invalidate()
+        blinkTimer = nil
     }
 
     private func buildMenu() {
@@ -425,6 +527,15 @@ final class NgrokMonitor: NSObject, NSMenuDelegate {
         editConfigItem.target = self
         menu.addItem(editConfigItem)
 
+        let prefsItem = NSMenuItem(title: "Preferences…", action: #selector(openPreferences), keyEquivalent: ",")
+        prefsItem.target = self
+        menu.addItem(prefsItem)
+
+        let hotKey = NSMenuItem(title: "Start/Stop Shortcut: none", action: #selector(openPreferences), keyEquivalent: "")
+        hotKey.target = self
+        menu.addItem(hotKey)
+        hotKeyItem = hotKey
+
         let updateItem = NSMenuItem(title: "Check for ngrok update…", action: #selector(checkForNgrokUpdate), keyEquivalent: "")
         updateItem.target = self
         menu.addItem(updateItem)
@@ -521,7 +632,7 @@ final class NgrokMonitor: NSObject, NSMenuDelegate {
         let isRunning = NgrokProcessManager.shared.running || !tunnelURLs.isEmpty
 
         if let title = titleItem {
-            let statusIcon = isRunning ? "🟢" : "⚫"
+            let statusIcon = isStarting ? "🟡" : (isRunning ? "🟢" : "⚫")
             let s = "\(statusIcon) Ngrok Monitor"
             title.title = s
             title.attributedTitle = NSAttributedString(
@@ -530,11 +641,16 @@ final class NgrokMonitor: NSObject, NSMenuDelegate {
             )
         }
         if let start = startItem {
-            start.title = isRunning ? "▶  ngrok is running" : "▶  Start ngrok"
-            start.isEnabled = !isRunning
+            if isStarting {
+                start.title = "⏳  Starting ngrok…"
+                start.isEnabled = false
+            } else {
+                start.title = isRunning ? "▶  ngrok is running" : "▶  Start ngrok"
+                start.isEnabled = !isRunning
+            }
         }
         if let stop = stopItem {
-            stop.isEnabled = isRunning
+            stop.isEnabled = isRunning && !isStarting
         }
         if let ver = versionItem {
             let label = ngrokVersion.map { "ngrok v\($0)" } ?? "ngrok (version unknown)"
@@ -613,7 +729,9 @@ final class NgrokMonitor: NSObject, NSMenuDelegate {
         guard let item = statusLineItem else { return }
         let isRunning = NgrokProcessManager.shared.running || !tunnelURLs.isEmpty
         let text: String
-        if isRunning {
+        if isStarting {
+            text = "Status: Starting…"
+        } else if isRunning {
             let timeoutLabel = timeoutOptions[currentTimeoutIndex].0
             let remaining = formatRemaining(trafficMonitor.timeUntilTimeout)
             text = "Status: Running | Auto-stop: \(timeoutLabel) (\(remaining) left)"

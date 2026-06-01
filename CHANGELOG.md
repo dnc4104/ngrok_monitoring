@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.1.0] - 2026-06-01
+
+### Added
+- Configurable global keyboard shortcut to start/stop ngrok from anywhere.
+  Record it in the new Preferences window (⌘,); the active binding is shown
+  in the menu.
+- "Starting…" feedback while ngrok spins up: the menu-bar icon blinks
+  green/black, the menu shows a 🟡 status, and repeat shortcut presses are
+  ignored until startup resolves.
+
 ## [1.0.0] - 2026-05-18
 
 ### Added
