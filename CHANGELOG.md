@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.2.0] - 2026-10-15
+
 ### Added
 - Local HTTP control API so external tools (e.g. an automation agent) can start
   ngrok on demand, stop it, and read its status *through* the app — keeping the
