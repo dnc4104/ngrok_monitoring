@@ -4,6 +4,10 @@ enum Constants {
     /// Local port the ngrok agent web UI / API listens on.
     static let ngrokAgentPort: UInt16 = 4040
 
+    /// Loopback port NgrokMonitor's own HTTP control server listens on, so
+    /// external tools (e.g. an agent) can start/stop ngrok and query status.
+    static let controlPort: UInt16 = 4042
+
     /// Search paths probed in order to locate the `ngrok` executable.
     static let ngrokSearchPaths: [String] = [
         "/opt/homebrew/bin/ngrok",

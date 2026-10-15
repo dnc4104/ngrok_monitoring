@@ -91,6 +91,9 @@ final class NgrokMonitor: NSObject, NSMenuDelegate {
         // and without this the onInactivity callback stays nil → auto-stop dead.
         setupTrafficMonitor()
         applyHotKey(KeyboardShortcut.load())
+        // Expose a loopback HTTP endpoint so external tools (e.g. an agent) can
+        // start/stop ngrok through the app and keep the UI in sync.
+        ControlServer.shared.start()
         DispatchQueue.global(qos: .utility).async { [weak self] in
             let version = NgrokProcessManager.shared.currentVersion()
             DispatchQueue.main.async {
@@ -222,7 +225,47 @@ final class NgrokMonitor: NSObject, NSMenuDelegate {
     // MARK: - Actions
 
     @objc private func startNgrok() {
-        guard !isStarting else { return }
+        performStart { [weak self] result in
+            guard let self = self else { return }
+            if case .failure(let error) = result {
+                // A benign double-press (code 2 = "already starting") shouldn't alert.
+                if (error as NSError).code == 2 { return }
+                self.showAlert(title: "Couldn’t start ngrok", message: error.localizedDescription)
+                self.postNotification(title: "Ngrok Monitor", body: "Couldn’t start ngrok — check the dialog for details.")
+            }
+        }
+    }
+
+    @objc private func stopNgrok() {
+        performStop()
+    }
+
+    /// Shared start path used by the menu, the global hotkey, and the HTTP
+    /// control server. Delivers the live tunnel URLs on success, or the error on
+    /// failure. Callers decide how to surface a failure (alert vs HTTP body).
+    func performStart(completion: ((Result<[String], Error>) -> Void)? = nil) {
+        guard !isStarting else {
+            completion?(.failure(NSError(domain: "NgrokMonitor", code: 2, userInfo: [
+                NSLocalizedDescriptionKey: "ngrok is already starting",
+            ])))
+            return
+        }
+
+        // Reconcile first: a live agent API on :4040 means ngrok is already up
+        // (possibly started outside the app). Adopt it and wire monitoring
+        // instead of firing a second `ngrok start` that ngrok would reject.
+        if NgrokProcessManager.shared.running || isLocalPortOpen(Constants.ngrokAgentPort) {
+            NgrokProcessManager.shared.syncFromAPI()
+            setupTrafficMonitor()
+            trafficMonitor.startMonitoring()
+            fetchTunnels()
+            scheduleTunnelRefresh()
+            updateStatusItemText()
+            refreshDynamicItems()
+            completion?(.success(tunnelURLs))
+            return
+        }
+
         isStarting = true
         updateStatusItemText()
         refreshDynamicItems()
@@ -231,10 +274,9 @@ final class NgrokMonitor: NSObject, NSMenuDelegate {
             DispatchQueue.main.async {
                 self.isStarting = false
                 if let error = error {
-                    self.showAlert(title: "Couldn’t start ngrok", message: error.localizedDescription)
-                    self.postNotification(title: "Ngrok Monitor", body: "Couldn’t start ngrok — check the dialog for details.")
                     self.updateStatusItemText()
                     self.refreshDynamicItems()
+                    completion?(.failure(error))
                     return
                 }
                 self.updateStatusItemText()
@@ -243,18 +285,22 @@ final class NgrokMonitor: NSObject, NSMenuDelegate {
                 self.fetchTunnels()
                 self.scheduleTunnelRefresh()
                 self.refreshDynamicItems()
+                completion?(.success(self.tunnelURLs))
             }
         }
     }
 
-    @objc private func stopNgrok() {
+    /// Shared stop path used by the menu and the HTTP control server.
+    func performStop(completion: (() -> Void)? = nil) {
         NgrokProcessManager.shared.stop { [weak self] _ in
-            guard let self = self else { return }
+            guard let self = self else { completion?(); return }
             DispatchQueue.main.async {
                 self.tunnelURLs.removeAll()
                 self.trafficLog.removeAll()
                 self.trafficMonitor.stopMonitoring()
                 self.updateStatusItemText()
+                self.refreshDynamicItems()
+                completion?()
             }
         }
     }

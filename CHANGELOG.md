@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- Local HTTP control API so external tools (e.g. an automation agent) can start
+  ngrok on demand, stop it, and read its status *through* the app — keeping the
+  menu-bar icon, auto-stop timer, and traffic view in sync. Loopback-only
+  (`127.0.0.1:4042`); `GET /status`, `POST /start`, `POST /stop`. The mutating
+  endpoints require an `X-NgrokMonitor-Control` header so a drive-by web page
+  can't trigger them cross-origin. See the README for details.
+
 ## [1.1.1] - 2026-06-01
 
 ### Fixed
